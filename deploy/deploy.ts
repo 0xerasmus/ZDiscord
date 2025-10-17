@@ -11,7 +11,13 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   });
 
   console.log(`FHECounter contract: `, deployedFHECounter.address);
+
+  const deployedEncryptedMessenger = await deploy("EncryptedMessenger", {
+    from: deployer,
+    log: true,
+  });
+  console.log(`EncryptedMessenger contract: `, deployedEncryptedMessenger.address);
 };
 export default func;
-func.id = "deploy_fheCounter"; // id required to prevent reexecution
-func.tags = ["FHECounter"];
+func.id = "deploy_contracts"; // id required to prevent reexecution
+func.tags = ["FHECounter", "EncryptedMessenger"];
