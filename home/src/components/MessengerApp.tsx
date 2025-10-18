@@ -26,28 +26,69 @@ async function encryptWithAddress(address: string, plaintext: string): Promise<s
   return btoa(String.fromCharCode(...out));
 }
 
-async function decryptWithAddress(address: string, encoded: string): Promise<string> {
-  const key = await deriveKeyFromAddress(address);
-  const binary = atob(encoded);
+function toHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return `0x${hex}`;
+}
+
+function formatEncryptedPreview(payload: string | Uint8Array): string {
+  const text = payload instanceof Uint8Array ? toHex(payload) : payload;
+  return text.length > 64 ? `${text.slice(0, 60)}...` : text;
+}
+
+function normalizeEncryptedPayload(payload: string | Uint8Array): Uint8Array {
+  if (payload instanceof Uint8Array) {
+    return payload;
+  }
+
+  const trimmed = payload.trim();
+  if (trimmed.startsWith('0x') && trimmed.length >= 4) {
+    const hex = trimmed.slice(2);
+    if (hex.length % 2 !== 0) {
+      throw new Error('Invalid hex payload');
+    }
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+  }
+
+  const cleaned = trimmed.replace(/\s+/g, '');
+  const binary = atob(cleaned);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
+  return bytes;
+}
+
+async function decryptWithAddress(address: string, encoded: string | Uint8Array): Promise<string> {
+  const key = await deriveKeyFromAddress(address);
+  const bytes = normalizeEncryptedPayload(encoded);
   if (bytes.length < 13) {
-    throw new Error('Invalid encrypted payload');
+    throw new Error('Invalid encrypted payload length');
   }
   const iv = bytes.slice(0, 12);
   const ciphertext = bytes.slice(12);
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    ciphertext
+  );
   return new TextDecoder().decode(decrypted);
 }
 
 type MessageItem = {
   from: string;
   timestamp: bigint;
-  encryptedContent: string;
+  encryptedContent: string | Uint8Array;
   encAddr: string;
   decryptedText?: string;
+  decryptedAddress?: string;
   decrypting?: boolean;
   error?: string;
 };
@@ -85,7 +126,19 @@ export function MessengerApp() {
       const out: MessageItem[] = [];
       for (let i = 0; i < c; i++) {
         const [from, ts, encContent, encAddr] = await contract.getMessageAt(address, i);
-        out.push({ from, timestamp: ts, encryptedContent: encContent, encAddr });
+        out.push({
+          from,
+          timestamp: ts,
+          encryptedContent: encContent,
+          encAddr: typeof encAddr === 'string' ? encAddr : String(encAddr),
+        });
+        console.log('Loaded message', {
+          index: i,
+          from,
+          timestamp: Number(ts),
+          encAddr,
+          encryptedContent: encContent,
+        });
       }
       setItems(out);
       setLoaded(true);
@@ -95,29 +148,94 @@ export function MessengerApp() {
 
   const handleDecrypt = useCallback(
     async (index: number) => {
-      if (!address) return;
+      if (!address || !instance) return;
 
-      let encryptedContent = '';
-      let canDecrypt = false;
+      const current = items[index];
+      if (!current || current.decrypting) {
+        console.log('Decrypt skipped: invalid state', { index, current });
+        return;
+      }
+
+      const encryptedContent = current.encryptedContent;
+      const encryptedAddressHandle = current.encAddr as string;
+
+      console.log('Decrypt start', {
+        index,
+        from: current.from,
+        encryptedContent: encryptedContent instanceof Uint8Array
+          ? toHex(encryptedContent)
+          : encryptedContent,
+        encAddr: encryptedAddressHandle,
+      });
 
       setItems((prev) => {
-        const current = prev[index];
-        if (!current || current.decrypting) {
-          return prev;
-        }
-        encryptedContent = current.encryptedContent;
-        canDecrypt = true;
         const next = [...prev];
         next[index] = { ...next[index], decrypting: true, error: undefined };
         return next;
       });
 
-      if (!canDecrypt) {
-        return;
-      }
-
       try {
+        const signer = await signerPromise;
+        if (!signer) {
+          throw new Error('Wallet signer unavailable.');
+        }
+
         const plaintext = await decryptWithAddress(address, encryptedContent);
+
+        let decryptedAddress: string | undefined;
+        let decryptError: string | undefined;
+
+        try {
+          const keypair = instance.generateKeypair();
+          const startTimestamp = Math.floor(Date.now() / 1000).toString();
+          const durationDays = '7';
+          const contractAddresses = [CONTRACT_ADDRESS];
+          const handleContractPairs = [
+            {
+              handle: encryptedAddressHandle,
+              contractAddress: CONTRACT_ADDRESS,
+            },
+          ];
+
+          const eip712 = instance.createEIP712(
+            keypair.publicKey,
+            contractAddresses,
+            startTimestamp,
+            durationDays
+          );
+
+          const signature = await signer.signTypedData(
+            eip712.domain,
+            { UserDecryptRequestVerification: eip712.types.UserDecryptRequestVerification },
+            eip712.message
+          );
+
+          const decryption = await instance.userDecrypt(
+            handleContractPairs,
+            keypair.privateKey,
+            keypair.publicKey,
+            signature.replace(/^0x/, ''),
+            contractAddresses,
+            signer.address,
+            startTimestamp,
+            durationDays
+          );
+
+          const rawAddress =
+            decryption[encryptedAddressHandle] ??
+            decryption[encryptedAddressHandle.replace(/^0x/, '')];
+          if (typeof rawAddress === 'string') {
+            decryptedAddress = rawAddress;
+          } else if (typeof rawAddress === 'bigint') {
+            decryptedAddress = `0x${rawAddress.toString(16)}`;
+          }
+        } catch (zamaError) {
+          console.error('Zama decryption failed', zamaError);
+          decryptError = zamaError instanceof Error ? zamaError.message : 'Failed to decrypt Zama address.';
+        }
+
+        console.log('Decrypt success', { index, plaintext, decryptedAddress });
+
         setItems((prev) => {
           if (!prev[index]) return prev;
           const next = [...prev];
@@ -125,21 +243,24 @@ export function MessengerApp() {
             ...next[index],
             decrypting: false,
             decryptedText: plaintext,
-            error: undefined,
+            decryptedAddress: decryptedAddress || next[index].decryptedAddress,
+            error: decryptError,
           };
           return next;
         });
       } catch (err) {
         console.error(err);
+        console.log('Decrypt failed', { index, error: err });
+        const message = err instanceof Error ? err.message : 'Unable to decrypt message.';
         setItems((prev) => {
           if (!prev[index]) return prev;
           const next = [...prev];
-          next[index] = { ...next[index], decrypting: false, error: 'Unable to decrypt message.' };
+          next[index] = { ...next[index], decrypting: false, error: message };
           return next;
         });
       }
     },
-    [address]
+    [address, instance, signerPromise, items]
   );
 
   const onSend = useCallback(async () => {
@@ -386,15 +507,19 @@ export function MessengerApp() {
                               <span className="decrypted-label">Decrypted Message</span>
                             </div>
                             <div className="decrypted-text">{m.decryptedText}</div>
+                            {m.decryptedAddress && (
+                              <div className="decrypted-address">
+                                <span className="field-label">Zama Address:</span>
+                                <code className="address-code">{m.decryptedAddress}</code>
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <>
                             <div className="message-field">
                               <span className="field-label">Encrypted Content:</span>
                               <div className="encrypted-content">
-                                {m.encryptedContent.length > 64
-                                  ? `${m.encryptedContent.slice(0, 60)}...`
-                                  : m.encryptedContent}
+                                {formatEncryptedPreview(m.encryptedContent)}
                               </div>
                             </div>
                             <button
