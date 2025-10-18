@@ -1,7 +1,7 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useReadContract } from 'wagmi';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserProvider, Contract } from 'ethers';
+import { useCallback, useEffect, useState } from 'react';
+import { Contract } from 'ethers';
 import { useEthersSigner } from '../hooks/useEthersSigner';
 import { useZamaInstance } from '../hooks/useZamaInstance';
 import { CONTRACT_ABI, CONTRACT_ADDRESS } from '../config/messenger';
@@ -26,7 +26,7 @@ async function encryptWithAddress(address: string, plaintext: string): Promise<s
 }
 
 export function MessengerApp() {
-  const { address, isConnected, chain } = useAccount();
+  const { address, isConnected } = useAccount();
   const signerPromise = useEthersSigner();
   const { instance, isLoading: zamaLoading, error: zamaError } = useZamaInstance();
 
@@ -58,8 +58,9 @@ export function MessengerApp() {
   useEffect(() => {
     const load = async () => {
       if (!address || !count) return;
-      const provider = new BrowserProvider((await signerPromise)!.provider);
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI as any, provider);
+      const signer = await signerPromise;
+      if (!signer || !signer.provider) return;
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI as any, signer.provider);
       const c = Number(count as bigint);
       const out: typeof messages = [];
       for (let i = 0; i < c; i++) {
@@ -87,7 +88,7 @@ export function MessengerApp() {
 
       const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI as any, signer);
       const tx = await contract.sendMessage(to, encryptedContent, encrypted.handles[0], encrypted.inputProof);
-      const r = await tx.wait();
+      await tx.wait();
       setTxHash(tx.hash);
       await refetchCount();
     } catch (e) {
@@ -100,7 +101,7 @@ export function MessengerApp() {
   return (
     <div style={{ maxWidth: 880, margin: '0 auto', padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h2>Zama Encrypted Messenger</h2>
+        <h2>Zama Discord</h2>
         <ConnectButton />
       </div>
 
@@ -148,4 +149,3 @@ export function MessengerApp() {
     </div>
   );
 }
-
