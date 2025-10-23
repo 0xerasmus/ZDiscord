@@ -1,4 +1,4 @@
-# ZamaDiscord - Private Messaging DApp
+# ZDiscord - Private Messaging DApp
 
 A fully decentralized, privacy-first messaging application built on Ethereum using Zama's Fully Homomorphic Encryption (FHE) technology. ZamaDiscord enables users to send end-to-end encrypted messages on-chain while maintaining complete privacy and confidentiality through cutting-edge cryptographic techniques.
 
